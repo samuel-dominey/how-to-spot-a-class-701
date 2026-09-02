@@ -1,69 +1,156 @@
-import Image from "next/image";
+"use client";
+
+import { useEffect, useMemo, useRef, useState } from "react";
+import HTMLFlipBook from "react-pageflip";
+import { GlobalWorkerOptions, getDocument, type PDFDocumentProxy } from "pdfjs-dist";
+
+type PageImage = { page: number; dataUrl: string };
+type Size = { w: number; h: number };
 
 export default function Home() {
+  const [pages, setPages] = useState<PageImage[]>([]);
+  const [error, setError] = useState<string | null>(null);
+
+  const [vp, setVp] = useState({ w: 0, h: 0 });
+  const [pagePx, setPagePx] = useState<Size | null>(null);
+
+  const renderIdRef = useRef(0);
+
+  useEffect(() => {
+    const onResize = () => setVp({ w: window.innerWidth, h: window.innerHeight });
+    onResize();
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
+  // Worker from /public
+  useEffect(() => {
+    GlobalWorkerOptions.workerSrc = "/pdfjs/pdf.worker.min.mjs";
+  }, []);
+
+  // Decide portrait vs spread (tweak breakpoint if you want)
+  const isPortrait = useMemo(() => {
+    // If the screen is narrow, use single page.
+    return vp.w < 900;
+  }, [vp.w]);
+
+  useEffect(() => {
+    if (!vp.w || !vp.h) return;
+
+    const myRenderId = ++renderIdRef.current;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        setError(null);
+        setPages([]);
+        setPagePx(null);
+
+        const task = getDocument({ url: "/book.pdf" });
+        const pdf: PDFDocumentProxy = await task.promise;
+
+        const first = await pdf.getPage(1);
+        const baseVp = first.getViewport({ scale: 1 });
+
+        const padding = 24;
+        const maxW = Math.max(320, vp.w - padding * 2);
+        const maxH = Math.max(420, vp.h - padding * 2);
+
+        // If we’re in spread mode, we must fit TWO pages across.
+        // PageFlip will display two pages side-by-side in landscape mode,
+        // so the “book” width is ~2 * pageWidth.
+        const spreadFactor = isPortrait ? 1 : 2;
+
+        const fitScale = Math.min(
+          maxW / (baseVp.width * spreadFactor),
+          maxH / baseVp.height
+        );
+
+        const rendered: PageImage[] = [];
+
+        for (let i = 1; i <= pdf.numPages; i++) {
+          if (cancelled || renderIdRef.current !== myRenderId) return;
+
+          const page = await pdf.getPage(i);
+          const viewport = page.getViewport({ scale: fitScale });
+
+          const canvas = document.createElement("canvas");
+          const ctx = canvas.getContext("2d");
+          if (!ctx) throw new Error("Could not get canvas 2D context");
+
+          canvas.width = Math.floor(viewport.width);
+          canvas.height = Math.floor(viewport.height);
+
+          await page.render({ canvas, canvasContext: ctx, viewport }).promise;
+
+          // Each flipbook “page” is a single PDF page; flipbook itself shows 1 or 2 at once.
+          if (i === 1) setPagePx({ w: canvas.width, h: canvas.height });
+
+          rendered.push({ page: i, dataUrl: canvas.toDataURL("image/jpeg", 0.9) });
+        }
+
+        if (!cancelled && renderIdRef.current === myRenderId) setPages(rendered);
+      } catch (e: unknown) {
+        console.error(e);
+        if (!cancelled) setError(e instanceof Error ? e.message : "Failed to render PDF");
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [vp.w, vp.h, isPortrait]);
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert h-5 w-[100px]"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the{" "}
-            <code className="rounded bg-black/[.06] px-1.5 py-0.5 font-mono text-[0.9em] dark:bg-white/[.08]">
-              page.tsx
-            </code>{" "}
-            file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
+    <main className="fixed inset-0 bg-neutral-900">
+      <div className="relative h-full w-full p-6 grid place-items-center">
+        {error && (
+          <div className="absolute top-4 left-4 right-4 rounded border border-red-300 bg-red-50 p-3 text-red-800">
+            {error}
+          </div>
+        )}
+
+        {pages.length === 0 && !error && <p className="text-white">Loading the How to Spot a Class 701 Guide…</p>}
+
+        {pages.length > 0 && pagePx && (
+          <HTMLFlipBook
+            style={{}}
+            startPage={0}
+            width={pagePx.w}
+            height={pagePx.h}
+            minWidth={pagePx.w}
+            maxWidth={pagePx.w}
+            minHeight={pagePx.h}
+            maxHeight={pagePx.h}
+            size="fixed"
+            drawShadow={true}
+            flippingTime={700}
+            usePortrait={isPortrait}   // <-- key: false on desktop = two-page spread
+            startZIndex={0}
+            autoSize={false}
+            maxShadowOpacity={0.25}
+            showCover={true}
+            mobileScrollSupport={true}
+            clickEventForward={true}
+            useMouseEvents={true}
+            swipeDistance={30}
+            showPageCorners={true}
+            disableFlipByClick={false}
+            className="shadow-2xl"
           >
-            <Image
-              className="dark:invert h-[14px] w-4"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={14}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
-    </div>
+            {pages.map((p) => (
+              <div key={p.page} className="w-full h-full bg-white overflow-hidden">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={p.dataUrl}
+                  alt={`Page ${p.page}`}
+                  className="w-full h-full object-contain"
+                />
+              </div>
+            ))}
+          </HTMLFlipBook>
+        )}
+      </div>
+    </main>
   );
 }
